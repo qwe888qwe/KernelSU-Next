@@ -10,11 +10,14 @@
 #include <linux/version.h>
 #include <linux/sched/task_stack.h>
 #include <linux/compat.h>
+#include <asm/current.h>
+#include <linux/cred.h>
 
 #include "arch.h"
 #include "klog.h" // IWYU pragma: keep
 #include "hook/syscall_hook_manager.h"
 #include "hook/tp_marker.h"
+#include "policy/allowlist.h"
 #include "feature/sucompat.h"
 #include "hook/setuid_hook.h"
 #include "hook/syscall_hook.h"
@@ -107,6 +110,24 @@ static void ksu_sys_enter_handler(void *data, struct pt_regs *regs, long id)
         return;
 
     if (ksu_has_syscall_hook(id)) {
+        /*
+         * Timing side-channel mitigation (Abnormal Environment):
+         *
+         * newfstatat/faccessat are hooked and go through the full
+         * redirect chain (rewrite syscallno -> dispatcher -> handler ->
+         * original syscall), while statx is not hooked and only pays
+         * the tracepoint + table lookup cost. Measuring the timing
+         * ratio between the two reveals KernelSU.
+         *
+         * The sucompat handlers already fall through to the original
+         * syscall for non-allowlisted UIDs, so bailing out here is
+         * behaviourally identical while skipping the whole chain.
+         */
+        if ((id == __NR_newfstatat || id == __NR_faccessat) &&
+            !ksu_is_allow_uid_for_current(current_uid().val)) {
+            return;
+        }
+
         struct pt_regs *current_regs = task_pt_regs(current);
 
 #if defined(__x86_64__)
